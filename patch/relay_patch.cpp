@@ -158,7 +158,15 @@ static relay_cfg_t build_cfg(void)
 static void apply_cfg(void)
 {
     relay_cfg_t c = build_cfg();
-    if(memcmp(&c, &R.cfg, sizeof c) != 0) relay_set_cfg(&R, &c);
+    if(memcmp(&c, &R.cfg, sizeof c) == 0) return;
+    /* A channel change silences every voice, the test note included;
+     * forget it so the menu does not send a stray note-off later. */
+    if(c.channel != R.cfg.channel)
+    {
+        g_test_note = -1;
+        g_test_step = 0;
+    }
+    relay_set_cfg(&R, &c);
 }
 
 static void read_knobs(void)

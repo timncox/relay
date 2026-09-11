@@ -164,8 +164,10 @@ Nothing has run on hardware. In rough order of "would surprise me":
    schematic, not measured. Gate out level likewise.
 3. Patch USB MIDI on the Seed's micro-USB alongside the bootloader's DFU on
    the same port (the app owns the port after the 2 s boot window).
-4. Patch DTCM at 80 %: two libDaisy MIDI queues at 36 KB each plus the
-   picker's buffers. Builds; not exercised.
+4. RAM headroom: Patch DTCM at 80 % (two libDaisy MIDI queues at 36 KB
+   each plus the picker's buffers), Lab DTCM at 86 % (the SDK's own use
+   plus one MIDI queue), with the picker and a QSPI save both running from
+   the same stack. Builds; not exercised.
 5. Alchemy jack polarity and level: `SetVolts(5.0f)` on every backend, and
    the codec-out gates on J9/J10 (24-bit, block-rate, nominal scaling).
 6. Latency: MIDI → jack goes through the 1 ms poll; the MCP flush is
