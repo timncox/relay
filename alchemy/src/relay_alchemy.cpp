@@ -362,7 +362,18 @@ static void apply_knobs(void)
     c.glide_legato = (uint8_t)((int)s_legato.Value() == 1);
     c.trig_ms     = 5;
     c.reset_ms    = 10;
-    if(memcmp(&c, &R.cfg, sizeof c) != 0) relay_set_cfg(&R, &c);
+    if(memcmp(&c, &R.cfg, sizeof c) != 0)
+    {
+        /* A channel or voice-count change silences every voice, the test
+         * note included; forget it so B2 does not send a stray note-off
+         * later and the amber light matches what is sounding. */
+        if(c.channel != R.cfg.channel || c.voices != R.cfg.voices)
+        {
+            g_test_note = -1;
+            g_test_step = 0;
+        }
+        relay_set_cfg(&R, &c);
+    }
 
     g_src_a     = zoned(z_srca, k_srca.Norm());
     g_src_b     = zoned(z_srcb, k_srcb.Norm());
