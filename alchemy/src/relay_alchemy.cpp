@@ -347,6 +347,10 @@ static Zoned z_chan{17}, z_voices{4}, z_prio{3}, z_clock{6}, z_srca{5}, z_srcb{5
 
 static int g_src_a = 1, g_src_b = 3, g_cc_a = 1, g_cc_b = 74, g_j10_reset = 0;
 
+/* Test note state (B2), see test_set() below. */
+static int g_test_step = 0;
+static int g_test_note = -1;
+
 static void apply_knobs(void)
 {
     relay_cfg_t c = R.cfg;
@@ -452,9 +456,6 @@ static void write_jacks(void)
 }
 
 /* ---- test note ------------------------------------------------------------------ */
-
-static int g_test_step = 0;
-static int g_test_note = -1;
 
 static void test_set(int step)
 {
