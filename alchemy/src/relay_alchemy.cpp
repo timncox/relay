@@ -758,11 +758,18 @@ int main(void)
         pager.SetStored(kPageSetup, kPotBottomRight, 0.5f / 2.0f,   phys); /* J10 = Run     */
     }
 
-    /* The PLAY page comes up honest: whatever a pot points at is the
-     * channel, the voice count, the priority. Setup keeps its stored values
-     * behind the catch. */
-    for(uint8_t p = 0; p < kNumPots; p++)
-        pager.SetStored(kPagePlay, p, phys[p], phys);
+    /* The PLAY page. With nothing saved (first boot after a flash) it
+     * adopts the pots, so whatever a pot points at is what the module
+     * does. With a saved state it keeps the saved values, and each pot
+     * must catch its value before it takes over: the pots are shared by
+     * every firmware on the card, so after a picker switch they point
+     * wherever the last firmware left them, and adopting them would
+     * overwrite this one's settings with another's. BootLoad() left the
+     * Pager a deferred re-arm for its first Update(), which arms the
+     * catch against phys without touching the stored values. */
+    if (!had_boot)
+        for (uint8_t p = 0; p < kNumPots; p++)
+            pager.SetStored(kPagePlay, p, phys[p], phys);
 
     /* USB: one class per boot. Decided by the stored setting. */
     g_hostlink_mode = (int)s_usb.Value() == 1;
