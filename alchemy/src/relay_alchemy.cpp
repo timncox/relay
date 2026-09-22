@@ -264,6 +264,17 @@ static Manual manual = Manual()
 static ControlLoop loop(hw);
 static Pager       pager = Pager(kNumAppPages, kNumPots)
                                .Shift(hw.buttons[kButtonB3], kPageSetup);
+
+/*
+ * This firmware's own preset slot. Every Alchemy firmware in the family
+ * keeps its working state in a slot of its own -- Smack 12, Mark 13, Belt
+ * 14, Relay 15 -- so switching firmware through the SD picker no longer
+ * resets the one you left. Slot 0, where they all used to autosave, is
+ * read once at boot for migration only (see main). Slots 0-11 are left for
+ * presets saved by hand; saving one by hand into 12-15 overwrites that
+ * firmware's working state.
+ */
+static constexpr uint8_t kHomeSlot = 15u;
 static Presets     presets(hw.seed.qspi);
 static Settings    settings(hw, &pager);
 static SdCard      sd;
@@ -596,7 +607,7 @@ static void OnFrame(void)
        && !hw.buttons[kButtonB1].Pressed() && !hw.buttons[kButtonB2].Pressed()
        && !hw.buttons[kButtonB3].Pressed())
     {
-        presets.Save(0);
+        presets.Save(kHomeSlot);
         g_dirty = false;
     }
     (void)g_saved_cfg_hash;
@@ -705,6 +716,7 @@ int main(void)
     /* HostLink: identity, descriptor, SD file access. Only attached to the
      * loop in HostLink mode; declaring it costs nothing. */
     host.Product("Relay")
+        .BootSlot(kHomeSlot)
         .Pages(play_page, setup_page)
         .Jacks(jk_j1, jk_j2, jk_j3, jk_j4, jk_j5, jk_j6, jk_j7, jk_j8, jk_j9, jk_j10)
         .Buttons(bt_panic, bt_test, bt_setup)
@@ -716,8 +728,15 @@ int main(void)
     presets.Manage(settings);
     presets.Manage(extras);
     presets.Init();
-    const bool had_boot = presets.HasValid(0);
+    /* BootLoad() still runs: it fires HostLink's pre-boot hook, and it
+     * restores slot 0 when slot 0 holds THIS firmware's settings (the
+     * schema gate refuses any other), which carries a module's settings
+     * over from the builds that autosaved there. The home slot, once it
+     * holds anything, wins. */
+    const bool had_home = presets.HasValid(kHomeSlot);
+    const bool had_boot = had_home || presets.HasValid(0);
     presets.BootLoad();
+    if (had_home) presets.Load(kHomeSlot);
 
     /* Physical pot positions, primed. */
     float phys[kNumPots];
