@@ -88,7 +88,7 @@ never in the card root.
 | knob 1 | octave transpose −2..+2 (five zones, with hysteresis) |
 | knob 2 | glide, 0..2 s, square law |
 | knobs 3, 4 / CV ins / gate ins | unused |
-| encoder | turn = menu, push+turn = edit, hold 1 s = module picker |
+| encoder | turn = menu, push+turn = edit; push+turn on Mods = module picker |
 
 Screen: channel and which input is alive (TRS / USB), the sounding note
 with its volts and a gate box (a "!" means the pitch is outside 0..5 V

@@ -9,7 +9,7 @@
  *   GATE OUT    gate (with an optional retrigger dip)
  *   knob 1      octave transpose, -2..+2
  *   knob 2      glide time
- *   encoder     turn = menu, push+turn = edit, hold 1 s = module picker
+ *   encoder     turn = menu, push+turn = edit; push+turn on Mods = module picker
  *
  * One voice: the Patch has one pitch output and one gate. The engine
  * (core/relay.c, shared with the Alchemy Lab build) does priority, legato,
@@ -324,8 +324,7 @@ static const char *const MENU_LABEL[MI_COUNT] = {"Chan",  "Prio",   "Retrig", "B
                                                  "CalOfs", "Test",  "Mods"};
 static constexpr int      MENU_ROWS = 4;
 static int                g_sel = MI_CHAN, g_top = 0;
-static bool               enc_down, enc_turned, enc_held;
-static constexpr uint32_t HOLD_PICKER_MS = 1000;
+static bool               enc_down, enc_turned;
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -364,7 +363,6 @@ static void encoder(void)
     {
         enc_down   = true;
         enc_turned = false;
-        enc_held   = false;
     }
     int inc = hw.encoder.Increment();
     if(inc)
@@ -380,12 +378,6 @@ static void encoder(void)
             if(g_sel < g_top) g_top = g_sel;
             if(g_sel >= g_top + MENU_ROWS) g_top = g_sel - MENU_ROWS + 1;
         }
-    }
-    if(enc_down && !enc_turned && !enc_held && hw.encoder.Pressed()
-       && (uint32_t)hw.encoder.TimeHeldMs() > HOLD_PICKER_MS)
-    {
-        enc_held = true;
-        picker::run(hw);
     }
     if(enc_down && !hw.encoder.Pressed()) enc_down = false;
 }
