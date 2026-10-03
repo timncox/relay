@@ -360,11 +360,18 @@ static void menu_edit(int inc)
         case MI_TEST: test_set(clampi(g_test_step + inc, 0, 5)); return; /* not saved */
         case MI_MODS:
             picker::run(hw); /* modal; returns only if the user backs out */
+            enc_down = false; /* its release edge happened inside the picker */
             return;
     }
     mark_dirty();
 }
 
+/* A press is tracked by libDaisy's own edges, never by Pressed(): RisingEdge
+ * (switch state 0x7f) comes one 1 ms update BEFORE Pressed() (0xff), and a
+ * bounce while turning a held knob drops Pressed() for up to 8 ms. Clearing
+ * enc_down on !Pressed() threw every press away in the pass that set it, so
+ * push-and-turn only moved the cursor on hardware (found 2026-10-03).
+ * FallingEdge (0x80) needs 7 clean low samples: it fires once, on release. */
 static void encoder(void)
 {
     if(hw.encoder.RisingEdge())
@@ -375,10 +382,10 @@ static void encoder(void)
     int inc = hw.encoder.Increment();
     if(inc)
     {
-        if(enc_down && hw.encoder.Pressed())
+        if(enc_down)
         {
-            menu_edit(inc);
             enc_turned = true;
+            menu_edit(inc);
         }
         else
         {
@@ -387,7 +394,7 @@ static void encoder(void)
             if(g_sel >= g_top + MENU_ROWS) g_top = g_sel - MENU_ROWS + 1;
         }
     }
-    if(enc_down && !hw.encoder.Pressed()) enc_down = false;
+    if(hw.encoder.FallingEdge()) enc_down = false;
 }
 
 /* ------------------------------------------------------------------------ */
