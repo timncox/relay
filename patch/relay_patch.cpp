@@ -573,6 +573,11 @@ int main(void)
          * ms from the microsecond clock with the remainder carried, so
          * rounding cannot shorten a pulse either (see the snap below). */
         uint32_t now_us = System::GetUs();
+        /* GetUs() is TIM2's 32-bit count divided down to us, so it wraps
+         * every ~21.5 s (200 MHz tick), not at 2^32: resync there (one pass
+         * of time lost, pulses only lengthened) rather than read the jump
+         * as a huge dt. */
+        if(now_us < last_tick_us) last_tick_us = now_us;
         uint32_t dt     = (now_us - last_tick_us) / 1000u;
         last_tick_us += dt * 1000u;
         if(dt > 1000) dt = 1000; /* back from the picker or a QSPI save */
