@@ -549,7 +549,12 @@ float relay_source(const relay_t *r, relay_src_t src, uint8_t cc)
 {
     switch(src)
     {
-        case RELAY_SRC_VEL: return (float)r->last_vel / 127.0f;
+        case RELAY_SRC_VEL:
+            /* The sounding note's velocity, as the gate and the display
+             * see it: a note that loses on priority does not move it. */
+            if(r->last_voice >= 0 && r->last_voice < r->cfg.voices)
+                return (float)r->v[r->last_voice].vel / 127.0f;
+            return (float)r->last_vel / 127.0f;
         case RELAY_SRC_MOD: return (float)r->cc[1] / 127.0f;
         case RELAY_SRC_CC: return (float)r->cc[cc & 0x7F] / 127.0f;
         case RELAY_SRC_AT:

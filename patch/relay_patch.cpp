@@ -131,7 +131,7 @@ static uint32_t                    g_dirty_since = 0;
 static int   g_octave    = 0;    /* knob 1, -2..+2 */
 static float g_knob_oct  = 0.5f;
 static int   g_glide_ms  = 0;    /* knob 2 */
-static int   g_test_step = 0;    /* 0 off, 1.. = base + 12*(step-1) */
+static int   g_test_step = 0;    /* 0 off, 1.. = (step-1) volts */
 static int   g_test_note = -1;
 
 static relay_cfg_t build_cfg(void)
@@ -155,6 +155,8 @@ static relay_cfg_t build_cfg(void)
     return c;
 }
 
+static void test_set(int step);
+
 static void apply_cfg(void)
 {
     relay_cfg_t c = build_cfg();
@@ -166,7 +168,11 @@ static void apply_cfg(void)
         g_test_note = -1;
         g_test_step = 0;
     }
+    bool rebase = c.base_note != R.cfg.base_note;
     relay_set_cfg(&R, &c);
+    /* The octave knob (or Base) moved under a test note: move the note so
+     * the jack still shows the volts the menu names. */
+    if(rebase && g_test_step) test_set(g_test_step);
 }
 
 static void read_knobs(void)
@@ -277,9 +283,11 @@ static void write_outputs(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* Test note: a held note at the base note plus whole octaves, for tuning   */
-/* an oscillator with a meter or by ear. Injected as MIDI so it obeys the   */
-/* same rules as a played note.                                              */
+/* Test note: a held note at 0, 1, 2, 3 or 4 V, for tuning an oscillator   */
+/* with a meter or by ear. Injected as MIDI so it obeys the same rules as a */
+/* played note. Absolute volts: the note is the engine's live 0 V note      */
+/* (Base with the octave knob applied) plus whole octaves, so calibration   */
+/* holds wherever knob 1 sits.                                               */
 
 static void test_set(int step)
 {
@@ -292,7 +300,7 @@ static void test_set(int step)
     g_test_step = step;
     if(step > 0)
     {
-        int note = (int)BASE_NOTE[S->base] + 12 * (step - 1);
+        int note = (int)R.cfg.base_note + 12 * (step - 1);
         if(note > 127) note = 127;
         g_test_note = note;
         relay_event(&R, 0x90 | ch, (uint8_t)note, 100);
@@ -431,7 +439,9 @@ static void draw(void)
     else hw.display.DrawRect(112, 10, 121, 19, true, false);
     if(g_pitch_clipped)
     {
-        hw.display.SetCursor(124, 12);
+        /* Right of the gate box (112-121): x 122 + 6 px is the last column
+         * a 6-px glyph fits in; row 1's text ends by x 91. */
+        hw.display.SetCursor(122, 12);
         hw.display.WriteString("!", Font_6x8, true);
     }
 
@@ -496,7 +506,9 @@ static void draw(void)
                 value = num;
                 break;
             case MI_MODS:
-                snprintf(num, sizeof num, "%s %s", RELAY_VERSION, RELAY_GIT_HASH);
+                /* "0.1.0 abc1234" fills the row to 126 px; git may hand
+                 * back a longer hash, so keep seven digits. */
+                snprintf(num, sizeof num, "%s %.7s", RELAY_VERSION, RELAY_GIT_HASH);
                 value = num;
                 break;
         }
@@ -505,8 +517,10 @@ static void draw(void)
         hw.display.WriteString(line, Font_6x8, true);
     }
 
-    /* Clock and run, bottom right, only when there is a clock. */
-    if(R.clock_stale < RELAY_CLOCK_STALE_MS)
+    /* Clock and run, bottom right, only when there is a clock, and not
+     * while the Mods row (version + hash, the full width) is down there. */
+    bool mods_on_bottom = g_top + MENU_ROWS - 1 == MI_MODS;
+    if(R.clock_stale < RELAY_CLOCK_STALE_MS && !mods_on_bottom)
     {
         hw.display.SetCursor(128 - 4 * 6, 56);
         hw.display.WriteString(relay_run(&R) ? "RUN" : "clk", Font_6x8, true);
@@ -548,20 +562,33 @@ int main(void)
     hw.StartAudio(AudioCallback);
     write_outputs();
 
-    uint32_t last_draw = 0, last_tick = System::GetNow();
+    uint32_t last_draw = 0, last_tick_us = System::GetUs();
     for(;;)
     {
         uint32_t now = System::GetNow();
+
+        /* Time first, then this pass's events (the encoder's Test note and
+         * MIDI), then the jacks: a pulse started below is written at full
+         * length and never charged for time that passed before it. Whole
+         * ms from the microsecond clock with the remainder carried, so
+         * rounding cannot shorten a pulse either (see the snap below). */
+        uint32_t now_us = System::GetUs();
+        uint32_t dt     = (now_us - last_tick_us) / 1000u;
+        last_tick_us += dt * 1000u;
+        if(dt > 1000) dt = 1000; /* back from the picker or a QSPI save */
+        relay_tick(&R, dt);
+
         hw.ProcessAllControls();
         encoder();
         read_knobs();
         apply_cfg();
 
         pump_midi();
-        uint32_t dt = now - last_tick;
-        last_tick   = now;
-        relay_tick(&R, dt);
         write_outputs();
+        /* A note or Start may have begun a trigger, gate dip or reset
+         * pulse: count it from the moment it reached the jacks, dropping
+         * the sub-ms carry (under 1 ms of glide per note, inaudible). */
+        if(R.activity & (RELAY_ACT_NOTE | RELAY_ACT_START)) last_tick_us = System::GetUs();
 
         uint32_t act = relay_take_activity(&R);
         if(act & RELAY_ACT_ANY)

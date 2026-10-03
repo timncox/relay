@@ -46,7 +46,8 @@ enum { RELAY_PRIO_LAST = 0, RELAY_PRIO_LOW = 1, RELAY_PRIO_HIGH = 2 };
 
 /* Assignable sources for the "whatever you want" outputs. */
 typedef enum {
-    RELAY_SRC_VEL = 0,  /* velocity of the last note-on, 0..1 */
+    RELAY_SRC_VEL = 0,  /* velocity of the sounding note (of the voice the
+                           last note-on landed in), 0..1; held after release */
     RELAY_SRC_MOD,      /* CC 1, 0..1 */
     RELAY_SRC_CC,       /* CC number given to relay_source(), 0..1 */
     RELAY_SRC_AT,       /* aftertouch: channel pressure, or poly pressure of
@@ -149,7 +150,10 @@ void relay_feed(relay_t *r, uint8_t byte);
  * system byte (0xF0..0xFF) with data as applicable. */
 void relay_event(relay_t *r, uint8_t status, uint8_t d1, uint8_t d2);
 
-/* Advance timers and glides by dt_ms. Call at about 1 kHz. */
+/* Advance timers and glides by dt_ms. Call at about 1 kHz, BEFORE the
+ * pass's events: dt is time that already passed, and charging it to a
+ * pulse an event just started shortens that pulse (a 2 ms retrigger dip
+ * can vanish). Whole ms of a finer clock, remainder carried. */
 void relay_tick(relay_t *r, uint32_t dt_ms);
 
 /* All voices off, gates down, controllers left alone. */

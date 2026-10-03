@@ -26,7 +26,7 @@ firmware has been flashed; nothing has been heard or measured. See
 
 ```
 core/       relay.h, relay.c          the engine
-test/       make -C test              native tests (ASan + UBSan), 126 checks
+test/       make -C test              native tests (ASan + UBSan), 130 checks
 patch/      make -C patch             Daisy Patch firmware -> build/relay_patch.bin
 alchemy/    make -C alchemy           Alchemy Lab firmware -> build/relay_alchemy.bin
 tools/      hostlink-fs.mjs           card access over HostLink (Alchemy, HostLink mode only)
@@ -72,7 +72,13 @@ never in the card root.
 - **Controllers**: CC 120 and 123 release every voice; CC 121 zeroes bend,
   mod wheel and aftertouch; system reset (FF) releases everything and
   stops. Aftertouch is channel pressure or the last note's poly pressure,
-  whichever is higher.
+  whichever is higher. **Velocity** (the Vel source) is the sounding
+  note's — the voice the last note-on went to, so a note that loses on
+  priority does not move it, and a fallback note brings its own; it holds
+  after release.
+- **Pulses** (trigger, retrigger dip, reset) last at least their length:
+  the Patch ticks the engine before it reads the pass's MIDI and counts a
+  new pulse from when it reached the jack, in microseconds.
 - **Changing channel or voice count releases every voice first** so a pot
   sweep can never leave a gate up.
 
@@ -102,8 +108,9 @@ Menu: Chan, Prio, Retrig, Bend, Base, CV2, CV2 CC, Clock, Glide
 is a 33k/49k9 inverting stage into a 100k/100k inverting stage: gain 1.512,
 non-inverting overall, 0..3.3 V in → "0 - 5V" out. `CalScl` is the voltage
 at DAC full scale (default 4.990 V) and `CalOfs` the voltage at code 0
-(default 0 mV). `Test` holds the base note, then +1..+4 octaves, so a meter
-or a tuned oscillator can trim them: play the 0 V and 4 V test notes,
+(default 0 mV). `Test` holds a note at 0, 1, 2, 3 or 4 V — absolute, the
+0 V note follows the octave knob — so a meter or a tuned oscillator can
+trim them: play the 0 V and 4 V test notes,
 adjust CalScl until they are exactly four octaves apart, then CalOfs until
 0 V is 0 V. The gate out is the same op-amp topology, so a high gate is
 about +5 V.

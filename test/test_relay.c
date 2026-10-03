@@ -389,6 +389,23 @@ static void test_controllers(void)
     CHECK(NEAR(relay_source(&r, RELAY_SRC_CC, 74), 1.0f, 1e-6f));
     on(&r, 1, 60, 33);
     CHECK(NEAR(relay_source(&r, RELAY_SRC_VEL, 0), 33.0f / 127.0f, 1e-6f));
+    /* Velocity follows the sounding note: under low priority a higher note
+     * that loses does not move it; releasing the low note hands over. */
+    {
+        relay_t q;
+        relay_cfg_t c;
+        relay_default_cfg(&c);
+        c.priority = RELAY_PRIO_LOW;
+        relay_init(&q, &c);
+        on(&q, 1, 48, 127);
+        on(&q, 1, 60, 10);
+        CHECK(relay_voice_note(&q, 0) == 48);
+        CHECK(NEAR(relay_source(&q, RELAY_SRC_VEL, 0), 1.0f, 1e-6f));
+        off(&q, 1, 48);
+        CHECK(NEAR(relay_source(&q, RELAY_SRC_VEL, 0), 10.0f / 127.0f, 1e-6f));
+        off(&q, 1, 60);
+        CHECK(NEAR(relay_source(&q, RELAY_SRC_VEL, 0), 10.0f / 127.0f, 1e-6f));
+    }
 
     /* All notes off (123) and all sound off (120). */
     CHECK(relay_gate(&r, 0));
