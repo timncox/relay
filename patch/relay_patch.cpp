@@ -358,20 +358,20 @@ static void menu_edit(int inc)
         case MI_CALSCL: S->cal_scale_mv = (int16_t)clampi(S->cal_scale_mv + 5 * inc, 4000, 6000); break;
         case MI_CALOFS: S->cal_offset_mv = (int16_t)clampi(S->cal_offset_mv + inc, -300, 300); break;
         case MI_TEST: test_set(clampi(g_test_step + inc, 0, 5)); return; /* not saved */
-        case MI_MODS:
-            picker::run(hw); /* modal; returns only if the user backs out */
-            enc_down = false; /* its release edge happened inside the picker */
-            return;
+        case MI_MODS: return; /* a click opens the picker, see encoder() */
     }
     mark_dirty();
 }
 
-/* A press is tracked by libDaisy's own edges, never by Pressed(): RisingEdge
- * (switch state 0x7f) comes one 1 ms update BEFORE Pressed() (0xff), and a
- * bounce while turning a held knob drops Pressed() for up to 8 ms. Clearing
- * enc_down on !Pressed() threw every press away in the pass that set it, so
- * push-and-turn only moved the cursor on hardware (found 2026-10-03).
- * FallingEdge (0x80) needs 7 clean low samples: it fires once, on release. */
+/* Click to select, turn to change, click to let go (Tim, 2026-10-03: push-
+ * and-turn never worked on his Patch -- the switch does not stay closed while
+ * the knob turns). A click is a press and release with no turn in between,
+ * read from libDaisy's RisingEdge / FallingEdge only: Pressed() lags the edge
+ * by one 1 ms update and drops out on a bounce. While a row is selected
+ * (g_editing, '*' instead of '>') a turn edits it; otherwise a turn moves
+ * the cursor. A click on "mods" opens the module picker. */
+static bool g_editing;
+
 static void encoder(void)
 {
     if(hw.encoder.RisingEdge())
@@ -382,9 +382,9 @@ static void encoder(void)
     int inc = hw.encoder.Increment();
     if(inc)
     {
-        if(enc_down)
+        if(enc_down) enc_turned = true; /* a turn during a press is not a click */
+        if(g_editing)
         {
-            enc_turned = true;
             menu_edit(inc);
         }
         else
@@ -394,7 +394,16 @@ static void encoder(void)
             if(g_sel >= g_top + MENU_ROWS) g_top = g_sel - MENU_ROWS + 1;
         }
     }
-    if(hw.encoder.FallingEdge()) enc_down = false;
+    if(hw.encoder.FallingEdge())
+    {
+        bool click = enc_down && !enc_turned;
+        enc_down   = false;
+        if(!click) return;
+        if(g_sel == MI_MODS)
+            picker::run(hw); /* modal; returns only if the user backs out */
+        else
+            g_editing = !g_editing;
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -519,7 +528,7 @@ static void draw(void)
                 value = num;
                 break;
         }
-        snprintf(line, sizeof line, "%c%-6s %s", row == g_sel ? '>' : ' ', MENU_LABEL[row], value);
+        snprintf(line, sizeof line, "%c%-6s %s", row == g_sel ? (g_editing ? '*' : '>') : ' ', MENU_LABEL[row], value);
         hw.display.SetCursor(0, 32 + i * 8);
         hw.display.WriteString(line, Font_6x8, true);
     }
@@ -616,8 +625,12 @@ int main(void)
         }
 
         /* Save a few seconds after the last edit, hands off the encoder.
-         * Save() blocks on the QSPI write; the audio callback keeps running. */
-        if(g_dirty && now - g_dirty_since >= 2000 && !hw.encoder.Pressed())
+         * Save() blocks on the QSPI write; the audio callback keeps running.
+         * Signed: `now` is read at the top of the pass and an edit later in
+         * the same pass stamps g_dirty_since a tick after it -- unsigned, that
+         * wrapped to ~4e9 and saved mid-edit (found 2026-10-05 once clicks
+         * replaced push-and-turn, whose held button had masked it). */
+        if(g_dirty && (int32_t)(now - g_dirty_since) >= 2000 && !hw.encoder.Pressed())
         {
             storage.Save();
             g_dirty = false;
