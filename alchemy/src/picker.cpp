@@ -12,6 +12,7 @@
  * FatFS's own sector window and is exempt.
  */
 #include "picker.h"
+#include "picker_list.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -41,8 +42,7 @@ constexpr uint32_t kAxiLo    = 0x24000000u, kAxiHi    = 0x24080000u;
 constexpr uint32_t kQspiHi   = 0x90000000u + 8u * 1024u * 1024u;
 constexpr uint32_t kIflashLo = 0x08000000u, kIflashHi = 0x08020000u;
 
-constexpr int kMaxFiles = 16;
-constexpr int kNameLen  = 32;
+using picker_list::kNameLen;
 
 /* Arming gesture thresholds (pot 0..1). */
 constexpr float kArmBelow  = 0.85f;
@@ -70,10 +70,9 @@ struct State
     SdCard*     sd = nullptr;
     AlchemyLab* hw = nullptr;
 
-    int      count = 0;
-    char     name[kMaxFiles][kNameLen] = {};
-    uint32_t size[kMaxFiles] = {};
-    int      sel = 0;
+    picker_list::List list;   /* /alchemy and its folders, one level deep */
+    int      sel  = 0;            /* entry index in list (a file, or a folder on the knob) */
+    int      vsel = 0;            /* knob: slot in list.view */
 
     bool     flash_armed = false;   /* pot 1 seen below kArmBelow since entry */
     bool     dfu_armed   = false;   /* pot 2 likewise */
@@ -83,7 +82,8 @@ struct State
     uint32_t off      = 0;          /* write / verify offset */
     uint32_t erased   = 0;          /* erase offset */
     float    progress = 0.0f;       /* 0..1 for the FLASH ring */
-    const char* err   = "";
+    const char* err   = nullptr;   /* set with St::Error (read only then); null keeps g all-zero, in .bss, out of the SRAM image */
+    bool        remote = false;     /* this flash was started over HostLink */
 };
 
 State g;
@@ -98,6 +98,10 @@ alignas(32) ALCHEMY_SDMMC_BSS uint8_t s_chunk[kChunk + 32u];
 
 constexpr LedPanel::Rgb kFileOn  = {0x40, 0xFF, 0x60};
 constexpr LedPanel::Rgb kFileOff = {0x10, 0x18, 0x10};
+constexpr LedPanel::Rgb kDirOn   = {0xC0, 0x40, 0xFF};   /* a folder dot */
+constexpr LedPanel::Rgb kDirOff  = {0x20, 0x08, 0x30};
+constexpr LedPanel::Rgb kBackOn  = {0xFF, 0xFF, 0xFF};   /* the back dot inside a folder */
+constexpr LedPanel::Rgb kBackOff = {0x18, 0x18, 0x18};
 constexpr LedPanel::Rgb kNoCard  = {0x80, 0x00, 0x00};
 constexpr LedPanel::Rgb kNoDir   = {0x80, 0x30, 0x00};
 constexpr LedPanel::Rgb kArm     = {0xFF, 0x60, 0x00};
@@ -117,49 +121,68 @@ bool ready(uint32_t now)
     return g.sd && g.sd->EnsureMounted(now);
 }
 
+/* Read one folder's .bin files into the list. `sub` is "" for /alchemy
+ * itself; then its folders are collected into `dirs` for a second pass (one
+ * DIR object, opened once at a time). */
+void read_dir(const char* sub, char (*dirs)[kNameLen], int* ndirs)
+{
+    char path[64];
+    if (sub[0]) snprintf(path, sizeof path, "%s/%s", picker::kDir, sub);
+    else        snprintf(path, sizeof path, "%s", picker::kDir);
+
+    memset(&s_dir, 0, sizeof s_dir);
+    if (f_opendir(&s_dir, path) != FR_OK) return;
+    for (;;)
+    {
+        memset(&s_fno, 0, sizeof s_fno);
+        if (f_readdir(&s_dir, &s_fno) != FR_OK || s_fno.fname[0] == '\0') break;
+        if (s_fno.fattrib & AM_HID) continue;
+        /* macOS writes an AppleDouble "._name.bin" beside every file it
+         * copies to FAT, and folders like ".Trashes"; none are firmware. */
+        if (s_fno.fname[0] == '.') continue;
+        if (s_fno.fattrib & AM_DIR)
+        {
+            if (!sub[0] && dirs && *ndirs < picker_list::kMaxFolders
+                && strlen(s_fno.fname) < (size_t)kNameLen)
+                strcpy(dirs[(*ndirs)++], s_fno.fname);
+            continue;   /* one level deep only */
+        }
+        if (sub[0]) g.list.AddIn(sub, s_fno.fname, (uint32_t)s_fno.fsize);
+        else        g.list.AddFile(s_fno.fname, (uint32_t)s_fno.fsize);
+    }
+    f_closedir(&s_dir);
+}
+
+void clamp_sel()
+{
+    if (g.list.nview == 0) { g.vsel = 0; g.sel = 0; return; }
+    if (g.vsel >= g.list.nview) g.vsel = g.list.nview - 1;
+    if (g.vsel < 0) g.vsel = 0;
+    g.sel = g.list.view[g.vsel];
+}
+
 void scan(uint32_t now)
 {
-    g.count = 0;
-    g.sel   = 0;
+    g.list.Clear();
+    g.sel  = 0;
+    g.vsel = 0;
     if (!ready(now)) { g.st = St::NoCard; return; }
 
     SdCard::BusyGuard guard(*g.sd);
     memset(&s_dir, 0, sizeof s_dir);
     if (f_opendir(&s_dir, picker::kDir) != FR_OK) { g.st = St::NoDir; return; }
-
-    for (;;)
-    {
-        memset(&s_fno, 0, sizeof s_fno);
-        if (f_readdir(&s_dir, &s_fno) != FR_OK || s_fno.fname[0] == '\0') break;
-        if (s_fno.fattrib & (AM_DIR | AM_HID)) continue;
-        /* macOS writes an AppleDouble "._name.bin" beside every file it
-         * copies to FAT; those are not firmware. */
-        if (s_fno.fname[0] == '.') continue;
-        const char* fn = s_fno.fname;
-        size_t      L  = strlen(fn);
-        if (L < 5 || strcasecmp(fn + L - 4, ".bin") != 0) continue;
-        if (L > (size_t)kNameLen - 1) continue;   /* too long to reopen: skip */
-        if (g.count >= kMaxFiles) break;
-        memcpy(g.name[g.count], fn, L + 1);
-        g.size[g.count] = (uint32_t)s_fno.fsize;
-        g.count++;
-    }
     f_closedir(&s_dir);
 
-    /* Alphabetical, so the ring is stable across cards and rescans. */
-    for (int i = 1; i < g.count; i++)
-        for (int j = i; j > 0 && strcasecmp(g.name[j - 1], g.name[j]) > 0; j--)
-        {
-            char     tn[kNameLen];
-            uint32_t ts = g.size[j];
-            memcpy(tn, g.name[j], kNameLen);
-            memcpy(g.name[j], g.name[j - 1], kNameLen);
-            memcpy(g.name[j - 1], tn, kNameLen);
-            g.size[j]     = g.size[j - 1];
-            g.size[j - 1] = ts;
-        }
+    char dirs[picker_list::kMaxFolders][kNameLen] = {};
+    int  ndirs = 0;
+    read_dir("", dirs, &ndirs);
+    for (int d = 0; d < ndirs; d++) read_dir(dirs[d], nullptr, nullptr);
 
-    g.st = g.count ? St::Listed : St::Empty;
+    /* Alphabetical, so the ring is stable across cards and rescans. */
+    g.list.Finish();
+    clamp_sel();
+
+    g.st = g.list.nfiles ? St::Listed : St::Empty;
 }
 
 /* ---- flashing, one step per control frame ------------------------------- */
@@ -176,7 +199,7 @@ void begin_flash(uint32_t now)
     if (!ready(now)) { g.st = St::NoCard; return; }
 
     char path[64];
-    snprintf(path, sizeof path, "%s/%s", picker::kDir, g.name[g.sel]);
+    snprintf(path, sizeof path, "%s/%s", picker::kDir, g.list.name[g.sel]);
 
     SdCard::BusyGuard guard(*g.sd);
     memset(&s_fil, 0, sizeof s_fil);
@@ -314,6 +337,7 @@ void FileTick(SettingsSlot& slot, float phys, uint32_t t_ms)
     {
         g.flash_armed = false;
         g.dfu_armed   = false;
+        g.list.cur[0] = '\0';   /* the page always opens at the top level */
         if (g.st != St::Comparing && g.st != St::Erasing && g.st != St::Writing
             && g.st != St::Verifying)
             g.st = St::Unscanned;
@@ -330,10 +354,11 @@ void FileTick(SettingsSlot& slot, float phys, uint32_t t_ms)
             break;
         case St::Listed:
         {
-            int s = (int)(phys * (float)g.count);
+            int s = (int)(phys * (float)g.list.nview);
             if (s < 0) s = 0;
-            if (s >= g.count) s = g.count - 1;
-            g.sel = s;
+            if (s >= g.list.nview) s = g.list.nview - 1;
+            g.vsel = s;
+            clamp_sel();
             break;
         }
         default:
@@ -365,13 +390,22 @@ void FileRender(const SettingsSlot& slot, LedPanel& L, uint8_t pot,
         case St::Unscanned:
             break;
         default:
-            for (int i = 0; i < g.count; i++)
+        {
+            /* One level at a time: top files and folders, or a folder's
+             * back dot and files. Folders purple, back white, files green. */
+            const int n = g.list.nview;
+            for (int i = 0; i < n; i++)
             {
-                int idx = (g.count == 1) ? arc / 2
-                        : (int)lroundf((float)i * (float)(arc - 1) / (float)(g.count - 1));
-                L.SetRingByHour(pot, hour_at(geo, idx),
-                                L.ScaleGlobal(i == g.sel ? kFileOn : kFileOff));
+                int idx = (n == 1) ? arc / 2
+                        : (int)lroundf((float)i * (float)(arc - 1) / (float)(n - 1));
+                const int  e  = g.list.view[i];
+                const bool on = i == g.vsel;
+                LedPanel::Rgb c = on ? kFileOn : kFileOff;
+                if (e < 0)                                    c = on ? kBackOn : kBackOff;
+                else if (g.list.kind[e] == picker_list::kFolder) c = on ? kDirOn : kDirOff;
+                L.SetRingByHour(pot, hour_at(geo, idx), L.ScaleGlobal(c));
             }
+        }
             break;
     }
 }
@@ -390,6 +424,7 @@ void fill_ring(LedPanel& L, uint8_t pot, const ArcGeometry& geo, float frac,
 void FlashTick(SettingsSlot& slot, float phys, uint32_t t_ms)
 {
     (void)slot;
+    if (g.remote) return;   /* picker::Service() steps it */
     switch (g.st)
     {
         case St::Listed:
@@ -397,7 +432,23 @@ void FlashTick(SettingsSlot& slot, float phys, uint32_t t_ms)
             if (g.flash_armed && phys > kFireAbove)
             {
                 g.flash_armed = false;
-                begin_flash(t_ms);
+                /* On a folder dot the gesture opens the folder; on the back
+                 * dot it goes up. Nothing is written either way. */
+                if (g.list.nview > 0 && g.list.view[g.vsel] < 0)
+                {
+                    g.list.Up();
+                    g.vsel = 0;
+                    clamp_sel();
+                }
+                else if (g.list.nview > 0
+                         && g.list.kind[g.list.view[g.vsel]] == picker_list::kFolder)
+                {
+                    g.list.Enter(g.list.view[g.vsel]);
+                    g.vsel = 0;
+                    clamp_sel();
+                }
+                else
+                    begin_flash(t_ms);
             }
             break;
         case St::Comparing: step_compare(); break;
@@ -491,9 +542,101 @@ void DfuTickTracked(SettingsSlot& slot, float phys, uint32_t t_ms)
     DfuTick(slot, phys, t_ms);
 }
 
+/* ---- HostLink remote (the iPhone app) ------------------------------------ */
+
+bool in_flight()
+{
+    return g.st == St::Comparing || g.st == St::Erasing || g.st == St::Writing
+        || g.st == St::Verifying || g.st == St::Done;
+}
+
+uint32_t s_done_frames = 0;
+
+class RemoteSwitcher final : public phone::IFirmwareSwitcher
+{
+  public:
+    int List(uint32_t now_ms) override
+    {
+        if (in_flight()) return g.list.nfiles;   /* never rescan under a flash */
+        scan(now_ms);
+        if (g.st == St::NoCard)
+            return -(int)alchemy::hostlink::Status::FsNoCard;
+        return g.list.nfiles;
+    }
+    /* Every file on both levels, by its path under /alchemy. */
+    const char* Name(int i) const override
+    {
+        return (i >= 0 && i < g.list.nfiles) ? g.list.name[g.list.files[i]] : "";
+    }
+    uint32_t Size(int i) const override
+    {
+        return (i >= 0 && i < g.list.nfiles) ? g.list.size[g.list.files[i]] : 0u;
+    }
+
+    uint8_t Start(const char* name, uint32_t now_ms) override
+    {
+        using alchemy::hostlink::Status;
+        if (in_flight()) return (uint8_t)Status::Busy;
+        scan(now_ms);   /* the app may just have uploaded it */
+        if (g.st == St::NoCard) return (uint8_t)Status::FsNoCard;
+        const int idx = g.list.FindFile(name);
+        if (idx < 0) return (uint8_t)Status::FsNoFile;
+        g.sel         = idx;
+        g.flash_armed = false;
+        g.remote      = true;
+        s_done_frames = 0;
+        begin_flash(now_ms);
+        if (g.st == St::Error) g.remote = false;
+        return (uint8_t)Status::Ok;   /* errors show in FW_STATUS */
+    }
+
+    phone::FwState State() const override
+    {
+        switch (g.st)
+        {
+            case St::Comparing: return phone::kFwComparing;
+            case St::Erasing:   return phone::kFwErasing;
+            case St::Writing:   return phone::kFwWriting;
+            case St::Verifying: return phone::kFwVerifying;
+            case St::Done:      return phone::kFwDone;
+            case St::Same:      return phone::kFwSame;
+            case St::Error:     return phone::kFwError;
+            default:            return phone::kFwIdle;
+        }
+    }
+    float       Progress() const override { return g.progress; }
+    const char* Error() const override { return g.st == St::Error ? g.err : ""; }
+};
+
+RemoteSwitcher s_remote;
+
 } // namespace
 
 namespace picker {
+
+phone::IFirmwareSwitcher& Remote() { return s_remote; }
+
+void Service(uint32_t now_ms)
+{
+    (void)now_ms;
+    if (!g.remote) return;
+    switch (g.st)
+    {
+        case St::Comparing: step_compare(); break;
+        case St::Erasing:   step_erase();  break;
+        case St::Writing:   step_write();  break;
+        case St::Verifying: step_verify(); break;
+        case St::Done:
+            /* Give the app a few frames to read "done" before the reboot. */
+            if (++s_done_frames > 30u)
+                daisy::System::ResetToBootloader(
+                    daisy::System::BootloaderMode::DAISY_SKIP_TIMEOUT);
+            break;
+        default:   /* Same, Error, or the page took over: hand back */
+            g.remote = false;
+            break;
+    }
+}
 
 void Install(Settings& settings, uint8_t page, SdCard& sd, AlchemyLab& hw)
 {
@@ -520,8 +663,10 @@ void Install(Settings& settings, uint8_t page, SdCard& sd, AlchemyLab& hw)
         .Tick(FileTick).Render(FileRender)
         .Ident("fw.file").Name("File")
         .Help("Which file in `/alchemy` to flash. One dot per file, the "
-              "chosen one bright. Red: no card. Orange: no `alchemy` folder "
-              "or no `.bin` files in it.");
+              "chosen one bright. A folder inside `/alchemy` (say `mutable`) "
+              "shows as one purple dot: pick it and do the Flash gesture to "
+              "open it; inside, the first dot (white) goes back up. Red: no "
+              "card. Orange: no `alchemy` folder or no `.bin` files in it.");
 
     settings.Page(page).Pot(1).Custom()
         .Tick(FlashTickTracked).Render(FlashRender)

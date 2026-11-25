@@ -35,9 +35,12 @@ LIBDAISY_DIR ?= $(ALCHEMY_DIR)/vendor/libDaisy
 # ── App sources ─────────────────────────────────────────────────────────────
 CPP_SOURCES = \
     src/relay_alchemy.cpp \
-    src/picker.cpp
+    src/picker.cpp \
+    src/phone_ext.cpp \
+    src/midi_usb_transport.cpp \
+    src/usb_shared.cpp
 
-C_SOURCES = ../core/relay.c
+C_SOURCES = ../core/relay.c src/uac_none.c
 
 # ── Alchemy SDK, compiled straight from its tree ────────────────────────────
 CPP_SOURCES += $(sort $(shell find $(ALCHEMY_DIR)/framework/src -name '*.cpp'))

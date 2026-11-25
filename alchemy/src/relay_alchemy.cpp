@@ -27,7 +27,13 @@
  * CDC or MIDI descriptors), so USB MIDI and HostLink cannot share a boot.
  * The Settings screen's USB selector chooses; MIDI is the default and the
  * point of the firmware. Pick HostLink to reach presets and the card from
- * the web programmer, then switch back. Takes effect on the next boot.
+ * the web programmer, then switch back. Phone is HostLink inside USB MIDI
+ * SysEx for the Alchemy Screen iPhone app (phone_kit.h); it takes no notes.
+ * Takes effect on the next boot. Phone follows /alchemy/usb.cfg, the port
+ * setting the family shares (usb_shared.h): a card left in Phone or
+ * Phone+Audio boots Relay in Phone, any other value takes Relay out of
+ * Phone, and MIDI or HostLink here is otherwise Relay's own. B1 held
+ * through power-up is HostLink for that boot.
  *
  * Shared by copy with smack/mark/belt-alchemy: the shape of this file, the
  * picker, the .lds, the autosave.
@@ -61,6 +67,8 @@
 #include "alchemy/surface/virtual_knob.h"
 
 #include "extras.h"
+#include "led_mirror.h"
+#include "phone_kit.h"
 #include "picker.h"
 #include "relay.h"
 
@@ -124,7 +132,7 @@ static const char* const kBaseLabels[5]  = {"C-1", "C0", "C1", "C2", "C3"};
 static const uint8_t     kBaseNotes[5]   = {12, 24, 36, 48, 60};
 static const char* const kJ10Labels[2]   = {"Run", "Reset"};
 static const char* const kOnOff[2]       = {"Off", "On"};
-static const char* const kUsbLabels[2]   = {"MIDI", "HostLink"};
+static const char* const kUsbLabels[3]   = {"MIDI", "HostLink", "Phone"};
 static const char* const kLegatoLabels[2] = {"Always", "Legato"};
 
 /* ---- rings ---------------------------------------------------------------- */
@@ -256,14 +264,20 @@ static Manual manual = Manual()
         "J3-J6, gates J7-J10). Pitch is 1 V/oct from the 0 V note on the "
         "Setup page; PRIORITY, GLIDE and BEND do what they say. B1 is "
         "panic; B2 holds a test note for tuning. The Settings screen's USB "
-        "selector swaps the port between MIDI and HostLink on the next "
-        "boot; this page is only reachable in HostLink mode.");
+        "selector swaps the port between MIDI, HostLink and Phone (the "
+        "Alchemy Screen iPhone app) on the next boot; this page is only "
+        "reachable in HostLink or Phone mode.");
 
 /* ---- surfaces ------------------------------------------------------------ */
 
+/* The panel buttons with the iPhone app's presses added (phone_kit.h):
+ * everything below reads these instead of hw.buttons. */
+static phonefront::Buttons     g_ph;
+static phonefront::PanelButton g_btn[3];
+
 static ControlLoop loop(hw);
 static Pager       pager = Pager(kNumAppPages, kNumPots)
-                               .Shift(hw.buttons[kButtonB3], kPageSetup);
+                               .Shift(g_btn[kButtonB3], kPageSetup);
 
 /*
  * This firmware's own preset slot. Every Alchemy firmware in the family
@@ -283,6 +297,19 @@ static hostlink::Host host(presets, "relay_alchemy", "Relay",
                            RELAY_VERSION, RELAY_GIT_HASH);
 static RelayExtras    extras;
 static SelectorHandle s_retrig, s_usb, s_legato;
+
+/* Phone mode: HostLink over USB MIDI for the iPhone app, with the panel
+ * mirrored, the card's firmware list, and the buttons pressed remotely. */
+static daisy::UsbHandle               front_usb;
+static hostlink::MidiUsbHostTransport front_midi;
+static phone::LedMirror<kLedTotal>    led_mirror;
+static phone::PhoneExtension          phone_ext;
+static bool                           g_phone = false;
+
+static bool OnPhonePress(uint8_t button, uint8_t gesture, void*)
+{
+    return g_ph.Press(button, gesture, System::GetNow());
+}
 
 /* ---- USB MIDI product string ---------------------------------------------- */
 
@@ -524,7 +551,7 @@ static void OnPoll(uint32_t now)
 
     /* B1: all notes off. On release, so it cannot double with a chord. */
     {
-        const bool pressed = hw.buttons[kButtonB1].Pressed();
+        const bool pressed = g_btn[kButtonB1].Pressed();
         if(pressed && !b1.down) b1.down = true;
         if(b1.down && !pressed)
         {
@@ -539,8 +566,8 @@ static void OnPoll(uint32_t now)
      * is the Settings chord, and every trip into Settings would otherwise
      * leave a test note sounding. */
     {
-        const bool pressed = hw.buttons[kButtonB2].Pressed();
-        const bool shift   = hw.buttons[kButtonB3].Pressed();
+        const bool pressed = g_btn[kButtonB2].Pressed();
+        const bool shift   = g_btn[kButtonB3].Pressed();
         if(pressed && !b2.down)
         {
             b2.down = true;
@@ -589,6 +616,20 @@ static void OnFrame(void)
     }
 
     const bool sact = settings.IsActive();
+    /* A firmware switch the iPhone app started; a phone hold is let go
+     * when Settings opens. */
+    picker::Service(now);
+    if(sact) g_ph.Release();
+
+    /* Into or out of Phone goes to the card for the other firmwares, as
+     * soon as Settings closes: Phone is "phone", MIDI or HostLink "mac". */
+    static int shared_written = -2;
+    if(shared_written == -2) shared_written = (int)s_usb.Value() == 2 ? 3 : 0;
+    const int shared_want = (int)s_usb.Value() == 2 ? 3 : 0;
+    if(!sact && shared_want != shared_written && !picker::Busy()
+       && usbshared::Save(sd, shared_want, now))
+        shared_written = shared_want;
+
     if(prev_settings && !sact)
     {
         g_dirty       = true;
@@ -604,8 +645,8 @@ static void OnFrame(void)
      * covers from this thread, and the 1 ms poll is paused for the duration
      * (a gate edge during the write is late by that much). */
     if(g_dirty && now - g_dirty_since >= 5000u && !sact && !picker::Busy()
-       && !hw.buttons[kButtonB1].Pressed() && !hw.buttons[kButtonB2].Pressed()
-       && !hw.buttons[kButtonB3].Pressed())
+       && !g_btn[kButtonB1].Pressed() && !g_btn[kButtonB2].Pressed()
+       && !g_btn[kButtonB3].Pressed())
     {
         presets.Save(kHomeSlot);
         g_dirty = false;
@@ -673,6 +714,9 @@ static void AudioCallback(daisy::AudioHandle::InputBuffer  /*in*/,
 int main(void)
 {
     hw.Init(daisy::SaiHandle::Config::SampleRate::SAI_48KHZ, kBlockSize);
+    led_mirror.Wrap(hw.strip);   /* the iPhone app sees the panel */
+    hw.leds.Init(led_mirror, hw.Layout());
+    for(uint8_t b = 0; b < 3; b++) g_btn[b].Bind(hw.buttons[b], g_ph, b);
 
     relay_cfg_t cfg;
     relay_default_cfg(&cfg);
@@ -705,8 +749,10 @@ int main(void)
         .Ident("usb").Name("USB port")
         .Help("**MIDI**: the front USB-C is a USB MIDI device (the point of "
               "this firmware). **HostLink**: it is the web programmer's port "
-              "instead, for presets and the card. Takes effect on the next "
-              "boot. The B2 light is magenta in HostLink mode.");
+              "instead, for presets and the card. **Phone**: it is a USB MIDI "
+              "device for the Alchemy Screen iPhone app, which takes no notes. "
+              "Takes effect on the next boot. The B2 light is magenta in "
+              "HostLink and Phone.");
     s_legato = settings.Page(kSettingsMain).Pot(5)
         .Selector(kLegatoLabels).Default(0)
         .Ident("glide.legato").Name("Glide")
@@ -721,7 +767,12 @@ int main(void)
         .Jacks(jk_j1, jk_j2, jk_j3, jk_j4, jk_j5, jk_j6, jk_j7, jk_j8, jk_j9, jk_j10)
         .Buttons(bt_panic, bt_test, bt_setup)
         .Attach(manual)
-        .Extend(fs_ext);
+        .Extend(fs_ext)
+        .Extend(phone_ext);
+    phone_ext.Screen(led_mirror)
+        .Firmware(picker::Remote())
+        .Press(&OnPhonePress, nullptr)
+        .Unit(phonefront::UnitId());
 
     /* Preset payload: both pages, the settings screen, and the extras. */
     presets.Manage(pager);
@@ -771,8 +822,26 @@ int main(void)
         for (uint8_t p = 0; p < kNumPots; p++)
             pager.SetStored(kPagePlay, p, phys[p], phys);
 
+    /* Phone follows the card's shared port setting; MIDI and HostLink stay
+     * Relay's own unless the card takes it out of Phone. */
+    const int shared_usb = usbshared::Load(sd, 500);
+    if(shared_usb >= 3 && (int)s_usb.Value() != 2) s_usb.Default(2);
+    else if(shared_usb >= 0 && shared_usb < 3 && (int)s_usb.Value() == 2) s_usb.Default(0);
+    for(int i = 0; i < 20; i++)
+    {
+        hw.ProcessAllControls();
+        System::Delay(1);
+    }
+    const bool force_hostlink = hw.buttons[kButtonB1].Pressed();
+
     /* USB: one class per boot. Decided by the stored setting. */
-    g_hostlink_mode = (int)s_usb.Value() == 1;
+    g_phone         = (int)s_usb.Value() == 2 && !force_hostlink;
+    g_hostlink_mode = (int)s_usb.Value() != 0 || force_hostlink;
+    if(g_phone)
+    {
+        front_midi.Init(front_usb, daisy::UsbHandle::FS_EXTERNAL, "Alchemy Lab");
+        host.Transport(front_midi);
+    }
     if(!g_hostlink_mode)
     {
         HS_Desc.GetProductStrDescriptor = &ProductStrOverride;
